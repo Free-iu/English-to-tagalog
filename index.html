@@ -5,11 +5,6 @@
 <title>Tagalog Translator Agent</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-<!-- ===== Firebase (free tier auth + database, so login/progress persist) ===== -->
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
-
 <!-- ===== PDF text extraction, runs entirely in the browser ===== -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
@@ -36,26 +31,12 @@
 <body>
 
 <h1>📄 Tagalog Translator Agent</h1>
-<p class="small">Runs entirely in your browser. Your account/progress is stored in your own Firebase project (free tier) — nothing is sent to me or stored on my servers.</p>
+<p class="small">Runs entirely in your browser. Progress is saved in your browser's local storage — no account, no server, no Firebase needed.</p>
 
-<!-- ============= AUTH SECTION ============= -->
-<section id="authSection">
-  <h2>Log in / Sign up</h2>
-  <label>Email</label>
-  <input id="email" type="email" placeholder="you@example.com" />
-  <label>Password</label>
-  <input id="password" type="password" placeholder="At least 6 characters" />
-  <button onclick="signUp()">Sign up</button>
-  <button onclick="signIn()" class="secondary">Log in</button>
-  <p id="authError" class="small" style="color:red;"></p>
-</section>
-
-<!-- ============= APP SECTION (shown after login) ============= -->
-<section id="appSection" class="hidden">
-  <p>Logged in as <b id="userEmail"></b> &nbsp; <button class="secondary" onclick="logOut()">Log out</button></p>
-
+<!-- ============= APP SECTION ============= -->
+<section id="appSection">
   <h2>1. AI API key</h2>
-  <p class="warn">Only <b>Gemini</b> reliably works from inside a browser (Perplexity/Grok block direct browser calls — CORS — and would need a backend server, which a static GitHub Pages site doesn't have). Get a free Gemini key at
+  <p class="warn">Only <b>Gemini</b> reliably works from inside a browser (Perplexity/Grok block direct browser calls — CORS — and would need a backend server). Get a free Gemini key at
     <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</p>
   <label>Provider</label>
   <select id="provider">
@@ -65,7 +46,8 @@
   </select>
   <label>API key</label>
   <input id="apiKey" type="password" placeholder="Paste your key here" />
-  <button onclick="saveApiKey()">Save key to my account</button>
+  <button onclick="saveApiKey()">Save key to browser storage</button>
+  <p id="apiSaveMsg" class="small" style="color:green;"></p>
 
   <h2>2. Upload your file</h2>
   <input id="fileInput" type="file" accept=".pdf" />
@@ -88,28 +70,16 @@
 
 <script>
 /* =========================================================================
-   FIREBASE SETUP — replace this with YOUR OWN config.
-   Create a free project at https://console.firebase.google.com
-     -> Build > Authentication > enable "Email/Password"
-     -> Build > Firestore Database > create database (start in test mode,
-        then tighten rules — see README.md)
-     -> Project settings > General > "Your apps" > Web app > copy config
+   ALL DATA IS STORED IN localStorage — no Firebase, no account required.
+   Keys used:
+     "tl_apiKey"        — saved API key
+     "tl_provider"      — saved provider
+     "tl_chunks_<key>"  — JSON array of translated chunks for a file
    ========================================================================= */
-const firebaseConfig = {
-  apiKey: "YOUR_FIREBASE_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  appId: "YOUR_APP_ID"
-};
-firebase.initializeApp(firebaseConfig);
-const auth = firebase.auth();
-const db = firebase.firestore();
 
-let currentUser = null;
-let currentChunks = [];      // chunks extracted from the uploaded PDF (deterministic)
-let translatedMap = {};      // index -> translated text, loaded from Firestore
-let currentFileKey = null;   // identifies this file in Firestore (by name+size)
+let currentChunks = [];      // chunks extracted from the uploaded PDF
+let translatedMap = {};      // index -> translated text, loaded from localStorage
+let currentFileKey = null;   // identifies this file (by name+size)
 
 function log(msg) {
   const el = document.getElementById("log");
@@ -118,47 +88,22 @@ function log(msg) {
   console.log(msg);
 }
 
-/* ---------------------------- AUTH ---------------------------- */
-function signUp() {
-  const email = document.getElementById("email").value;
-  const pw = document.getElementById("password").value;
-  auth.createUserWithEmailAndPassword(email, pw)
-    .catch(e => document.getElementById("authError").textContent = e.message);
-}
-function signIn() {
-  const email = document.getElementById("email").value;
-  const pw = document.getElementById("password").value;
-  auth.signInWithEmailAndPassword(email, pw)
-    .catch(e => document.getElementById("authError").textContent = e.message);
-}
-function logOut() { auth.signOut(); }
-
-auth.onAuthStateChanged(async (user) => {
-  currentUser = user;
-  if (user) {
-    document.getElementById("authSection").classList.add("hidden");
-    document.getElementById("appSection").classList.remove("hidden");
-    document.getElementById("userEmail").textContent = user.email;
-    // Load saved API key/provider if present
-    const doc = await db.collection("users").doc(user.uid).get();
-    if (doc.exists) {
-      const data = doc.data();
-      if (data.apiKey) document.getElementById("apiKey").value = data.apiKey;
-      if (data.provider) document.getElementById("provider").value = data.provider;
-    }
-  } else {
-    document.getElementById("authSection").classList.remove("hidden");
-    document.getElementById("appSection").classList.add("hidden");
-  }
+/* ---------------------------- SETTINGS (localStorage) ---------------------------- */
+window.addEventListener("DOMContentLoaded", () => {
+  const savedKey = localStorage.getItem("tl_apiKey");
+  const savedProvider = localStorage.getItem("tl_provider");
+  if (savedKey) document.getElementById("apiKey").value = savedKey;
+  if (savedProvider) document.getElementById("provider").value = savedProvider;
 });
 
-async function saveApiKey() {
-  const apiKey = document.getElementById("apiKey").value;
+function saveApiKey() {
+  const apiKey = document.getElementById("apiKey").value.trim();
   const provider = document.getElementById("provider").value;
-  await db.collection("users").doc(currentUser.uid).set(
-    { apiKey, provider }, { merge: true }
-  );
-  log("API key saved to your account.");
+  localStorage.setItem("tl_apiKey", apiKey);
+  localStorage.setItem("tl_provider", provider);
+  document.getElementById("apiSaveMsg").textContent = "✓ Key saved to browser storage.";
+  setTimeout(() => document.getElementById("apiSaveMsg").textContent = "", 3000);
+  log("API key saved to browser storage.");
 }
 
 /* ---------------------------- PDF -> TEXT -> CHUNKS ---------------------------- */
@@ -183,7 +128,7 @@ function chunkPages(pages, limit = CHUNK_CHAR_LIMIT) {
   const chunks = [];
   let current = "";
   for (const pageText of pages) {
-    const paras = pageText.split(/(?<=[.?!])\s+/); // rough sentence/paragraph split
+    const paras = pageText.split(/(?<=[.?!])\s+/);
     for (const p of paras) {
       if (!p.trim()) continue;
       if (current.length + p.length + 1 > limit && current) {
@@ -261,33 +206,28 @@ function getCaller(provider) {
   throw new Error("Unknown provider");
 }
 
-/* ---------------------------- PROGRESS (Firestore) ---------------------------- */
+/* ---------------------------- PROGRESS (localStorage) ---------------------------- */
 function fileKeyFor(file) {
-  return `${file.name}_${file.size}`.replace(/[^a-zA-Z0-9_]/g, "_");
+  return "tl_chunks_" + `${file.name}_${file.size}`.replace(/[^a-zA-Z0-9_]/g, "_");
 }
 
-async function loadSavedChunks(fileKey) {
-  const snap = await db.collection("users").doc(currentUser.uid)
-    .collection("projects").doc(fileKey).collection("chunks").get();
-  const map = {};
-  snap.forEach(doc => { map[doc.id] = doc.data().text; });
-  return map;
+function loadSavedChunks(fileKey) {
+  try {
+    const raw = localStorage.getItem(fileKey);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
 }
 
-async function saveChunk(fileKey, index, text) {
-  await db.collection("users").doc(currentUser.uid)
-    .collection("projects").doc(fileKey).collection("chunks").doc(String(index))
-    .set({ text });
+function saveChunk(fileKey, index, text) {
+  translatedMap[index] = text;
+  localStorage.setItem(fileKey, JSON.stringify(translatedMap));
 }
 
-async function resetProgress() {
+function resetProgress() {
   if (!currentFileKey) { log("Upload a file first."); return; }
-  const colRef = db.collection("users").doc(currentUser.uid)
-    .collection("projects").doc(currentFileKey).collection("chunks");
-  const snap = await colRef.get();
-  const batch = db.batch();
-  snap.forEach(doc => batch.delete(doc.ref));
-  await batch.commit();
+  localStorage.removeItem(currentFileKey);
   translatedMap = {};
   log("Progress reset for this file.");
   updateProgressUI();
@@ -320,7 +260,7 @@ async function startTranslation() {
   log(`Split into ${currentChunks.length} chunk(s).`);
 
   log("Checking for previously saved progress...");
-  translatedMap = await loadSavedChunks(currentFileKey);
+  translatedMap = loadSavedChunks(currentFileKey);
   updateProgressUI();
 
   const callFn = getCaller(provider);
@@ -332,8 +272,7 @@ async function startTranslation() {
     for (let attempt = 1; attempt <= 3 && !success; attempt++) {
       try {
         const result = await callFn(currentChunks[i], apiKey);
-        translatedMap[i] = result.trim();
-        await saveChunk(currentFileKey, i, result.trim());
+        saveChunk(currentFileKey, i, result.trim());
         success = true;
       } catch (e) {
         log(`  attempt ${attempt} failed: ${e.message}`);
@@ -344,11 +283,11 @@ async function startTranslation() {
       log(`  giving up on chunk ${i + 1} for now — you can re-run later to retry just this one.`);
     }
     updateProgressUI();
-    await new Promise(r => setTimeout(r, 1500)); // be gentle with free-tier rate limits
+    await new Promise(r => setTimeout(r, 1500));
   }
 
   document.getElementById("startBtn").disabled = false;
-  log("Done (or stopped — check progress above). You can close this tab any time; progress is saved.");
+  log("Done (or stopped — check progress above). Progress is saved; you can close this tab and resume later.");
 }
 
 /* ---------------------------- DOCX BUILDING (client-side, via JSZip) ---------------------------- */
@@ -357,7 +296,7 @@ function escapeXml(str) {
 }
 
 async function downloadDocx() {
-  const fontSize = document.getElementById("fontSize").value; // 12 or 14
+  const fontSize = document.getElementById("fontSize").value;
   const halfPoints = String(parseInt(fontSize, 10) * 2);
 
   const total = currentChunks.length;
